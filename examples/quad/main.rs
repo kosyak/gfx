@@ -32,7 +32,7 @@ pub fn wasm_main() {
     main();
 }
 
-use hal::format::{AsFormat, ChannelType, Rgba8Srgb as ColorFormat, Swizzle};
+use hal::format::{AsFormat, ChannelType, /*Rgba8Srgb*/Rgba8Unorm as ColorFormat, Swizzle};
 use hal::pass::Subpass;
 use hal::pso::{PipelineStage, ShaderStageFlags, VertexInputRate};
 use hal::queue::Submission;
@@ -96,12 +96,12 @@ fn main() {
     env_logger::init();
 
     #[cfg(not(target_arch = "wasm32"))]
-    let mut events_loop = winit::EventsLoop::new();
+    let event_loop = back::glutin::event_loop::EventLoop::new();
 
     #[cfg(not(target_arch = "wasm32"))]
-    let wb = winit::WindowBuilder::new()
-        .with_min_dimensions(winit::dpi::LogicalSize::new(1.0, 1.0))
-        .with_dimensions(winit::dpi::LogicalSize::new(
+    let wb = back::glutin::window::WindowBuilder::new()
+        .with_min_inner_size(winit::dpi::LogicalSize::new(1.0, 1.0))
+        .with_inner_size(winit::dpi::LogicalSize::new(
             DIMS.width as _,
             DIMS.height as _,
         ))
@@ -109,7 +109,7 @@ fn main() {
     // instantiate backend
     #[cfg(not(feature = "gl"))]
     let (_window, _instance, mut adapters, mut surface) = {
-        let window = wb.build(&events_loop).unwrap();
+        let window = wb.build(&event_loop).unwrap();
         let instance = back::Instance::create("gfx-rs quad", 1);
         let surface = instance.create_surface(&window);
         let adapters = instance.enumerate_adapters();
@@ -119,11 +119,27 @@ fn main() {
     let (mut adapters, mut surface) = {
         #[cfg(not(target_arch = "wasm32"))]
         let window = {
+            let wb = wb
+                .with_fullscreen(Some(event_loop.primary_monitor()));
+
+            let cb = back::glutin::ContextBuilder::new()
+                .with_gl(back::glutin::GlRequest::GlThenGles { opengl_version: (3, 0), opengles_version: (2, 0) });
+
             let builder =
-                back::config_context(back::glutin::ContextBuilder::new(), ColorFormat::SELF, None)
+                back::config_context(cb, ColorFormat::SELF, None)
                     .with_vsync(true);
-            let context = builder.build_windowed(wb, &events_loop).unwrap();
-            unsafe { context.make_current() }.expect("Unable to make context current")
+
+            let windowed_context = builder
+                .build_windowed(wb, &event_loop)
+                .unwrap();
+
+            let windowed_context = unsafe { windowed_context.make_current().unwrap() };
+
+            use crate::back::glutin::platform::unix::WindowExtUnix;
+            windowed_context.swap_buffers().unwrap();
+            windowed_context.window().gbm_set_crtc();
+
+            windowed_context
         };
         #[cfg(target_arch = "wasm32")]
         let window = { back::Window };
@@ -280,8 +296,10 @@ fn main() {
         )
     }
     .unwrap();
+    dbg!("1");
     let image_req = unsafe { device.get_image_requirements(&image_logo) };
 
+    dbg!("2");
     let device_type = memory_types
         .iter()
         .enumerate()
@@ -292,6 +310,7 @@ fn main() {
         .unwrap()
         .into();
     let image_memory = unsafe { device.allocate_memory(device_type, image_req.size) }.unwrap();
+    dbg!("3");
 
     unsafe { device.bind_image_memory(&image_memory, 0, &mut image_logo) }.unwrap();
     let image_srv = unsafe {
@@ -304,6 +323,7 @@ fn main() {
         )
     }
     .unwrap();
+    dbg!("4");
 
     let sampler = unsafe {
         device.create_sampler(i::SamplerInfo::new(i::Filter::Linear, i::WrapMode::Clamp))
@@ -326,12 +346,15 @@ fn main() {
             },
         ]);
     }
+    dbg!("5");
 
     // copy buffer to texture
     let mut copy_fence = device.create_fence(false).expect("Could not create fence");
+    dbg!("5.1");
     unsafe {
         let mut cmd_buffer = command_pool.acquire_command_buffer::<command::OneShot>();
         cmd_buffer.begin();
+        dbg!("5.2");
 
         let image_barrier = m::Barrier::Image {
             states: (i::Access::empty(), i::Layout::Undefined)
@@ -341,12 +364,14 @@ fn main() {
             range: COLOR_RANGE.clone(),
         };
 
+        dbg!("5.3");
         cmd_buffer.pipeline_barrier(
             PipelineStage::TOP_OF_PIPE .. PipelineStage::TRANSFER,
             m::Dependencies::empty(),
             &[image_barrier],
         );
 
+        dbg!("5.4");
         cmd_buffer.copy_buffer_to_image(
             &image_upload_buffer,
             &image_logo,
@@ -369,6 +394,7 @@ fn main() {
             }],
         );
 
+        dbg!("5.5");
         let image_barrier = m::Barrier::Image {
             states: (i::Access::TRANSFER_WRITE, i::Layout::TransferDstOptimal)
                 .. (i::Access::SHADER_READ, i::Layout::ShaderReadOnlyOptimal),
@@ -382,14 +408,18 @@ fn main() {
             &[image_barrier],
         );
 
+        dbg!("5.6");
         cmd_buffer.finish();
+        dbg!("5.7");
 
         queue_group.queues[0].submit_without_semaphores(Some(&cmd_buffer), Some(&mut copy_fence));
+        dbg!("5.8");
 
         device
             .wait_for_fence(&copy_fence, !0)
             .expect("Can't wait for fence");
     }
+    dbg!("6");
 
     unsafe {
         device.destroy_fence(copy_fence);
@@ -409,9 +439,10 @@ fn main() {
     println!("{:?}", swap_config);
     let extent = swap_config.extent.to_extent();
 
-    let (mut swap_chain, mut backbuffer) =
+    let (swap_chain, backbuffer) =
         unsafe { device.create_swapchain(&mut surface, swap_config, None) }
             .expect("Can't create swapchain");
+    dbg!("7");
 
     let render_pass = {
         let attachment = pass::Attachment {
@@ -444,10 +475,13 @@ fn main() {
         unsafe { device.create_render_pass(&[attachment], &[subpass], &[dependency]) }
             .expect("Can't create render pass")
     };
+    dbg!("8");
 
-    let (mut frame_images, mut framebuffers) = {
-        let pairs = backbuffer
-            .into_iter()
+    let backbuffer_rc = std::rc::Rc::new(std::cell::RefCell::new(backbuffer));
+
+    let (frame_images, framebuffers) = {
+        let pairs = backbuffer_rc.borrow()
+            .iter()
             .map(|image| unsafe {
                 let rtv = device
                     .create_image_view(
@@ -458,7 +492,7 @@ fn main() {
                         COLOR_RANGE.clone(),
                     )
                     .unwrap();
-                (image, rtv)
+                (*image, rtv)
             })
             .collect::<Vec<_>>();
         let fbos = pairs
@@ -498,6 +532,7 @@ fn main() {
     // though.
     let mut cmd_pools = Vec::with_capacity(frames_in_flight);
     let mut cmd_buffers = Vec::with_capacity(frames_in_flight);
+    dbg!("9");
 
     cmd_pools.push(command_pool);
     for _ in 1 .. frames_in_flight {
@@ -624,6 +659,7 @@ fn main() {
 
         pipeline.unwrap()
     };
+    dbg!("10");
 
     // Rendering setup
     let mut viewport = pso::Viewport {
@@ -637,76 +673,91 @@ fn main() {
     };
 
     //
-    let mut running = true;
     let mut recreate_swapchain = false;
-    let mut resize_dims = Extent2D {
+    let resize_dims = Extent2D {
         width: 0,
         height: 0,
     };
     let mut frame: u64 = 0;
-    while running {
-        running = !cfg!(target_arch = "wasm32");
-        #[cfg(not(target_arch = "wasm32"))]
-        events_loop.poll_events(|event| {
-            if let winit::Event::WindowEvent { event, .. } = event {
-                #[allow(unused_variables)]
-                match event {
-                    winit::WindowEvent::KeyboardInput {
-                        input:
-                            winit::KeyboardInput {
-                                virtual_keycode: Some(winit::VirtualKeyCode::Escape),
-                                ..
-                            },
-                        ..
-                    }
-                    | winit::WindowEvent::CloseRequested => running = false,
-                    winit::WindowEvent::Resized(dims) => {
-                        println!("resized to {:?}", dims);
-                        #[cfg(feature = "gl")]
-                        {
-                            let context = surface.get_context();
-                            context.resize(dims.to_physical(context.window().get_hidpi_factor()));
-                        }
-                        recreate_swapchain = true;
-                        resize_dims.width = dims.width as u32;
-                        resize_dims.height = dims.height as u32;
-                    }
-                    _ => (),
+
+    let swap_chain_rc = std::cell::RefCell::new(swap_chain);
+    let framebuffers_rc = std::cell::RefCell::new(framebuffers);
+    let frame_images_rc = std::cell::RefCell::new(frame_images);
+
+    dbg!("11");
+
+    #[cfg(not(target_arch = "wasm32"))]
+    event_loop.run(move |event, _, control_flow| {
+        println!("{:?}", event);
+        *control_flow = back::glutin::event_loop::ControlFlow::Wait;
+
+        let swap_chain = &swap_chain_rc;
+        let framebuffers = &framebuffers_rc;
+        let backbuffer = &backbuffer_rc;
+        let frame_images = &frame_images_rc;
+
+        dbg!("12");
+
+        match event {
+            back::glutin::event::Event::LoopDestroyed => return,
+            back::glutin::event::Event::WindowEvent { event, .. } => match event {
+                back::glutin::event::WindowEvent::KeyboardInput {
+                    input:
+                        back::glutin::event::KeyboardInput {
+                            virtual_keycode: Some(back::glutin::event::VirtualKeyCode::Escape),
+                            ..
+                        },
+                    ..
                 }
-            }
-        });
+                | back::glutin::event::WindowEvent::CloseRequested => {
+                    *control_flow = back::glutin::event_loop::ControlFlow::Exit
+                }
+                back::glutin::event::WindowEvent::Resized(dims) => {
+                    println!("resized to {:?}", dims);
+                    #[cfg(feature = "gl")]
+                    {
+                        unimplemented!();
+                        // let context = surface.get_context();
+                        // context.resize(dims.to_physical(context.window().get_hidpi_factor()));
+                    }
+                    recreate_swapchain = true;
+                    resize_dims.width = dims.width as u32;
+                    resize_dims.height = dims.height as u32;
+                }
+                _ => (),
+            },
+            _ => (),
+        }
+
+        dbg!("13");
 
         // Window was resized so we must recreate swapchain and framebuffers
         if recreate_swapchain {
             device.wait_idle().unwrap();
 
+            dbg!("14");
             let (caps, formats, _present_modes) =
                 surface.compatibility(&mut adapter.physical_device);
             // Verify that previous format still exists so we may reuse it.
             assert!(formats.iter().any(|fs| fs.contains(&format)));
 
+            dbg!("15");
             let swap_config = SwapchainConfig::from_caps(&caps, format, resize_dims);
             println!("{:?}", swap_config);
             let extent = swap_config.extent.to_extent();
 
             let (new_swap_chain, new_backbuffer) =
-                unsafe { device.create_swapchain(&mut surface, swap_config, Some(swap_chain)) }
+                unsafe { device.create_swapchain(&mut surface, swap_config, None) }
                     .expect("Can't create swapchain");
 
-            unsafe {
-                // Clean up the old framebuffers, images and swapchain
-                for framebuffer in framebuffers {
-                    device.destroy_framebuffer(framebuffer);
-                }
-                for (_, rtv) in frame_images {
-                    device.destroy_image_view(rtv);
-                }
-            }
-
-            backbuffer = new_backbuffer;
-            swap_chain = new_swap_chain;
+            dbg!("16");
+            let _ = swap_chain.replace(new_swap_chain);
+            let _ = backbuffer.replace(new_backbuffer);
+            // backbuffer = new_backbuffer;
+            // swap_chain = new_swap_chain;
 
             let (new_frame_images, new_framebuffers) = {
+                let backbuffer = &*backbuffer.borrow_mut();
                 let pairs = backbuffer
                     .into_iter()
                     .map(|image| unsafe {
@@ -719,7 +770,7 @@ fn main() {
                                 COLOR_RANGE.clone(),
                             )
                             .unwrap();
-                        (image, rtv)
+                        (*image, rtv)
                     })
                     .collect::<Vec<_>>();
                 let fbos = pairs
@@ -733,21 +784,39 @@ fn main() {
                 (pairs, fbos)
             };
 
-            framebuffers = new_framebuffers;
-            frame_images = new_frame_images;
+            dbg!("17");
+
+            // framebuffers = new_framebuffers;
+            // frame_images = new_frame_images;
+            let old_framebuffers = framebuffers.replace(new_framebuffers);
+            let old_frame_images = frame_images.replace(new_frame_images);
             viewport.rect.w = extent.width as _;
             viewport.rect.h = extent.height as _;
             recreate_swapchain = false;
+
+            dbg!("18");
+
+            unsafe {
+                // Clean up the old framebuffers, images and swapchain
+                for framebuffer in old_framebuffers {
+                    device.destroy_framebuffer(framebuffer);
+                }
+                for (_, rtv) in old_frame_images {
+                    device.destroy_image_view(rtv);
+                }
+            }
+
+            dbg!("19");
         }
 
         // Use guaranteed unused acquire semaphore to get the index of the next frame we will render to
         // by using acquire_image
         let swap_image = unsafe {
-            match swap_chain.acquire_image(!0, Some(&free_acquire_semaphore), None) {
+            match swap_chain.borrow_mut().acquire_image(!0, Some(&free_acquire_semaphore), None) {
                 Ok((i, _)) => i as usize,
                 Err(_) => {
                     recreate_swapchain = true;
-                    continue;
+                    return;
                 }
             }
         };
@@ -792,7 +861,7 @@ fn main() {
             {
                 let mut encoder = cmd_buffer.begin_render_pass_inline(
                     &render_pass,
-                    &framebuffers[swap_image],
+                    &framebuffers.borrow()[swap_image],
                     viewport.rect,
                     &[command::ClearValue::Color(command::ClearColor::Sfloat([
                         0.8, 0.8, 0.8, 1.0,
@@ -814,7 +883,7 @@ fn main() {
             queue_group.queues[0].submit(submission, Some(&submission_complete_fences[frame_idx]));
 
             // present frame
-            if let Err(_) = swap_chain.present(
+            if let Err(_) = swap_chain.borrow().present(
                 &mut queue_group.queues[0],
                 swap_image as hal::SwapImageIndex,
                 Some(&submission_complete_semaphores[frame_idx]),
@@ -824,7 +893,7 @@ fn main() {
         }
         // Increment our frame
         frame += 1;
-    }
+    });
 
     // cleanup!
     device.wait_idle().unwrap();

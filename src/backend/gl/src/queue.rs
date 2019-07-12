@@ -8,7 +8,7 @@ use crate::hal::error;
 use glow::Context;
 use smallvec::SmallVec;
 
-use crate::info::LegacyFeatures;
+use crate::info::{LegacyFeatures, Version};
 use crate::{command as com, device, native, state};
 use crate::{Backend, GlContext, Share};
 
@@ -255,6 +255,7 @@ impl CommandQueue {
     }
 
     fn process(&mut self, cmd: &com::Command, data_buf: &[u8]) {
+        dbg!(cmd);
         match *cmd {
             com::Command::BindIndexBuffer(buffer) => {
                 let gl = &self.share.context;
@@ -465,19 +466,34 @@ impl CommandQueue {
                 state::set_blend_color(&self.share.context, color);
             }
             com::Command::ClearBufferColorF(draw_buffer, mut cv) => unsafe {
-                self.share
-                    .context
-                    .clear_buffer_f32_slice(glow::COLOR, draw_buffer, &mut cv);
+                if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+                    self.share
+                        .context
+                        .clear_buffer_f32_slice(glow::COLOR, draw_buffer, &mut cv);
+                } else {
+                    self.share.context.clear_color(cv[0], cv[1], cv[2], cv[3]);
+                    self.share.context.clear(glow::COLOR_BUFFER_BIT);
+                }
             },
             com::Command::ClearBufferColorU(draw_buffer, mut cv) => unsafe {
-                self.share
-                    .context
-                    .clear_buffer_u32_slice(glow::COLOR, draw_buffer, &mut cv);
+                if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+                    self.share
+                        .context
+                        .clear_buffer_u32_slice(glow::COLOR, draw_buffer, &mut cv);
+                } else {
+                    self.share.context.clear_color(cv[0] as f32, cv[1] as f32, cv[2] as f32, cv[3] as f32);
+                    self.share.context.clear(glow::COLOR_BUFFER_BIT);
+                }
             },
             com::Command::ClearBufferColorI(draw_buffer, mut cv) => unsafe {
-                self.share
-                    .context
-                    .clear_buffer_i32_slice(glow::COLOR, draw_buffer, &mut cv);
+                if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+                    self.share
+                        .context
+                        .clear_buffer_i32_slice(glow::COLOR, draw_buffer, &mut cv);
+                } else {
+                    self.share.context.clear_color(cv[0] as f32, cv[1] as f32, cv[2] as f32, cv[3] as f32);
+                    self.share.context.clear(glow::COLOR_BUFFER_BIT);
+                }
             },
             com::Command::ClearBufferDepthStencil(depth, stencil) => unsafe {
                 match (depth, stencil) {
@@ -518,7 +534,14 @@ impl CommandQueue {
             com::Command::BindFrameBuffer(point, frame_buffer) => {
                 if self.share.private_caps.framebuffer {
                     let gl = &self.share.context;
-                    unsafe { gl.bind_framebuffer(point, frame_buffer) };
+                    unsafe { gl.bind_framebuffer(
+                        if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+                            point
+                        } else {
+                            glow::FRAMEBUFFER
+                        },
+                        frame_buffer
+                    ) };
                     self.state.fbo = frame_buffer;
                 } else if frame_buffer.is_some() {
                     error!("Tried to bind FBO without FBO support!");
@@ -595,6 +618,7 @@ impl CommandQueue {
             }*/
             com::Command::CopyBufferToBuffer(src, dst, ref r) => unsafe {
                 let gl = &self.share.context;
+                dbg!("CopyBufferToBuffer");
                 gl.bind_buffer(glow::COPY_READ_BUFFER, Some(src));
                 gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(dst));
                 gl.copy_buffer_sub_data(
@@ -621,7 +645,12 @@ impl CommandQueue {
                 let gl = &self.share.context;
 
                 gl.active_texture(glow::TEXTURE0);
-                gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(src_buffer));
+                dbg!("CopyBufferToTexture", data, src_buffer);
+
+                let has_pbo = self.share.info.is_webgl() || self.share.info.version >= Version::new(2, 1, None, String::from(""));
+                if has_pbo {
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(src_buffer));
+                }
 
                 match texture_target {
                     glow::TEXTURE_2D => {
@@ -658,7 +687,9 @@ impl CommandQueue {
                     _ => unimplemented!(),
                 }
 
-                gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+                if has_pbo {
+                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+                }
             },
             com::Command::CopyBufferToSurface(..) => {
                 unimplemented!() //TODO: use FBO
@@ -677,6 +708,7 @@ impl CommandQueue {
                 assert_eq!(texture_target, glow::TEXTURE_2D);
                 let gl = &self.share.context;
                 gl.active_texture(glow::TEXTURE0);
+                dbg!("CopyTextureToBuffer");
                 gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(dst_buffer));
                 gl.bind_texture(glow::TEXTURE_2D, Some(src_texture));
                 gl.get_tex_image_pixel_buffer_offset(
@@ -869,7 +901,9 @@ impl CommandQueue {
                     Fill => (glow::FILL, glow::POLYGON_OFFSET_FILL),
                 };
 
-                unsafe { gl.polygon_mode(glow::FRONT_AND_BACK, gl_draw) };
+                if !self.share.info.version.is_embedded {
+                    unsafe { gl.polygon_mode(glow::FRONT_AND_BACK, gl_draw) };
+                }
 
                 match rasterizer.depth_bias {
                     Some(hal::pso::State::Static(bias)) => unsafe {
@@ -1048,22 +1082,30 @@ impl hal::queue::RawCommandQueue<Backend> for CommandQueue {
             swapchain.borrow().make_current();
 
             gl.bind_framebuffer(
-                glow::READ_FRAMEBUFFER,
+                if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+                    glow::READ_FRAMEBUFFER
+                } else {
+                    glow::FRAMEBUFFER
+                },
                 Some(swapchain.borrow().fbos[index as usize]),
             );
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
-            gl.blit_framebuffer(
-                0,
-                0,
-                extent.width as _,
-                extent.height as _,
-                0,
-                0,
-                extent.width as _,
-                extent.height as _,
-                glow::COLOR_BUFFER_BIT,
-                glow::LINEAR,
-            );
+
+            // TODO: https://stackoverflow.com/a/25472079
+            if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                gl.blit_framebuffer(
+                    0,
+                    0,
+                    extent.width as _,
+                    extent.height as _,
+                    0,
+                    0,
+                    extent.width as _,
+                    extent.height as _,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::LINEAR,
+                );
+            }
 
             #[cfg(all(feature = "glutin", not(target_arch = "wasm32")))]
             swapchain.borrow().context.swap_buffers().unwrap();

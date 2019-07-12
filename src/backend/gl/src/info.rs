@@ -8,32 +8,32 @@ use glow::Context;
 /// A version number for a specific component of an OpenGL implementation
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Version {
-    pub is_embedded: bool,
     pub major: u32,
     pub minor: u32,
     pub revision: Option<u32>,
     pub vendor_info: String,
+    pub is_embedded: bool,
 }
 
 impl Version {
     /// Create a new OpenGL version number
     pub fn new(major: u32, minor: u32, revision: Option<u32>, vendor_info: String) -> Self {
         Version {
-            is_embedded: false,
             major: major,
             minor: minor,
             revision: revision,
             vendor_info: vendor_info,
+            is_embedded: false,
         }
     }
     /// Create a new OpenGL ES version number
     pub fn new_embedded(major: u32, minor: u32, vendor_info: String) -> Self {
         Version {
-            is_embedded: true,
             major,
             minor,
             revision: None,
             vendor_info,
+            is_embedded: true,
         }
     }
 
@@ -292,12 +292,12 @@ impl Info {
                 .map(|s| s.to_string())
                 .collect()
         };
-        Info {
+        dbg!(Info {
             platform_name,
             version,
             shading_language,
             extensions,
-        }
+        })
     }
 
     pub fn is_version_supported(&self, major: u32, minor: u32) -> bool {

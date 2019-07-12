@@ -12,3 +12,7 @@ members = [
     "src/warden",
     "examples",
 ]
+
+[replace]
+"winit:0.20.0-alpha2" = { git = 'https://github.com/kosyak/winit.git', branch = 'master' }
+"glutin:0.22.0-alpha1" = { git = 'https://github.com/kosyak/glutin.git', branch = 'master' }

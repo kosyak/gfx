@@ -45,18 +45,27 @@
 //! ```
 
 use crate::hal::window::Extent2D;
-use crate::hal::{self, format as f, image, memory, CompositeAlpha};
-use crate::{native, Backend as B, Device, GlContainer, PhysicalDevice, QueueFamily, Starc};
-
-use glow::Context;
+use crate::hal::{self, format as f, image, CompositeAlpha};
+use crate::{native, Backend as B, GlContainer, PhysicalDevice, QueueFamily, Starc};
 
 use glutin;
 
-fn get_window_extent(window: &glutin::Window) -> image::Extent {
+use std::ffi::CString;
+
+use std::os::raw::{c_void, c_char, c_int};
+
+const RTLD_NOW: c_int = 0x002;
+
+#[link(name = "dl")]
+extern {
+    pub fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+    pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+
+fn get_window_extent(window: &glutin::window::Window) -> image::Extent {
     let px = window
-        .get_inner_size()
-        .unwrap()
-        .to_physical(window.get_hidpi_factor());
+        .inner_size()
+        .to_physical(window.hidpi_factor());
     image::Extent {
         width: px.width as image::Size,
         height: px.height as image::Size,
@@ -172,9 +181,13 @@ impl hal::Surface<B> for Surface {
 impl hal::Instance for Surface {
     type Backend = B;
     fn enumerate_adapters(&self) -> Vec<hal::Adapter<B>> {
+        let libgl = unsafe { dlopen(b"libGLESv2.so.2\0".as_ptr() as *const _, RTLD_NOW) };
         let adapter = PhysicalDevice::new_adapter(
             (),
-            GlContainer::from_fn_proc(|s| self.context.get_proc_address(s) as *const _),
+            GlContainer::from_fn_proc(|sym| {
+                let sym = CString::new(sym).unwrap();
+                unsafe { dlsym(libgl, sym.as_ptr()) }
+            }),
         );
         vec![adapter]
     }

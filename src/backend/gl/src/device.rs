@@ -28,7 +28,7 @@ use crate::hal::{
 
 use spirv_cross::{glsl, spirv, ErrorCode as SpirvErrorCode};
 
-use crate::info::LegacyFeatures;
+use crate::info::{LegacyFeatures, Version};
 use crate::pool::{BufferMemory, OwnedBuffer, RawCommandPool};
 use crate::{conv, native as n, state};
 use crate::{Backend as B, MemoryUsage, Share, Starc, Surface, Swapchain};
@@ -450,7 +450,9 @@ pub(crate) unsafe fn set_sampler_info<SetParamFloat, SetParamFloatVec, SetParamI
     let (s, t, r) = info.wrap_mode;
     set_param_int(glow::TEXTURE_WRAP_S, conv::wrap_to_gl(s) as i32);
     set_param_int(glow::TEXTURE_WRAP_T, conv::wrap_to_gl(t) as i32);
-    set_param_int(glow::TEXTURE_WRAP_R, conv::wrap_to_gl(r) as i32);
+    if !share.info.version.is_embedded || share.info.version >= Version::new(3, 0, None, String::from("")) {
+        set_param_int(glow::TEXTURE_WRAP_R, conv::wrap_to_gl(r) as i32);
+    }
 
     if share.features.contains(hal::Features::SAMPLER_MIP_LOD_BIAS) {
         set_param_float(glow::TEXTURE_LOD_BIAS, info.lod_bias.into());
@@ -463,20 +465,22 @@ pub(crate) unsafe fn set_sampler_info<SetParamFloat, SetParamFloatVec, SetParamI
         set_param_float_vec(glow::TEXTURE_BORDER_COLOR, &mut border);
     }
 
-    set_param_float(glow::TEXTURE_MIN_LOD, info.lod_range.start.into());
-    set_param_float(glow::TEXTURE_MAX_LOD, info.lod_range.end.into());
+    if !share.info.version.is_embedded || share.info.version >= Version::new(3, 0, None, String::from("")) {
+        set_param_float(glow::TEXTURE_MIN_LOD, info.lod_range.start.into());
+        set_param_float(glow::TEXTURE_MAX_LOD, info.lod_range.end.into());
 
-    match info.comparison {
-        None => set_param_int(glow::TEXTURE_COMPARE_MODE, glow::NONE as i32),
-        Some(cmp) => {
-            set_param_int(
-                glow::TEXTURE_COMPARE_MODE,
-                glow::COMPARE_REF_TO_TEXTURE as i32,
-            );
-            set_param_int(
-                glow::TEXTURE_COMPARE_FUNC,
-                state::map_comparison(cmp) as i32,
-            );
+        match info.comparison {
+            None => set_param_int(glow::TEXTURE_COMPARE_MODE, glow::NONE as i32),
+            Some(cmp) => {
+                set_param_int(
+                    glow::TEXTURE_COMPARE_MODE,
+                    glow::COMPARE_REF_TO_TEXTURE as i32,
+                );
+                set_param_int(
+                    glow::TEXTURE_COMPARE_FUNC,
+                    state::map_comparison(cmp) as i32,
+                );
+            }
         }
     }
 }
@@ -973,7 +977,11 @@ impl d::Device<B> for Device {
         let attachments: Vec<_> = attachments.into_iter().collect();
 
         let gl = &self.share.context;
-        let target = glow::DRAW_FRAMEBUFFER;
+        let target = if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+            glow::DRAW_FRAMEBUFFER
+        } else {
+            glow::FRAMEBUFFER
+        };
 
         let fbos = pass.subpasses.iter().map(|subpass| {
             let name = gl.create_framebuffer().unwrap();
@@ -1264,8 +1272,9 @@ impl d::Device<B> for Device {
     ) -> Result<n::Image, i::CreationError> {
         let gl = &self.share.context;
 
-        let (int_format, iformat, itype) = match format {
-            Format::Rgba8Unorm => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE),
+        let (int_format, iformat, itype) = match dbg!(format) {
+            // Format::Rgba8Unorm => (glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE),
+            Format::Rgba8Unorm => (glow::RGBA, glow::RGBA, glow::UNSIGNED_BYTE),
             Format::Bgra8Unorm => (glow::RGBA8, glow::BGRA, glow::UNSIGNED_BYTE),
             Format::Rgba8Srgb => (glow::SRGB8_ALPHA8, glow::RGBA, glow::UNSIGNED_BYTE),
             Format::Bgra8Srgb => (glow::SRGB8_ALPHA8, glow::BGRA, glow::UNSIGNED_BYTE),
@@ -1278,17 +1287,18 @@ impl d::Device<B> for Device {
             _ => unimplemented!(),
         };
 
-        let channel = format.base_format().1;
+        dbg!(int_format, iformat, itype, num_levels);
+        let channel = dbg!(format.base_format().1);
 
         let image = if num_levels > 1
             || usage.contains(i::Usage::STORAGE)
             || usage.contains(i::Usage::SAMPLED)
         {
-            let name = gl.create_texture().unwrap();
+            let name = dbg!(gl.create_texture().unwrap());
             match kind {
                 i::Kind::D2(w, h, 1, 1) => {
-                    gl.bind_texture(glow::TEXTURE_2D, Some(name));
-                    if self.share.private_caps.image_storage {
+                    dbg!(gl.bind_texture(glow::TEXTURE_2D, Some(name)));
+                    if dbg!(self.share.private_caps.image_storage) {
                         gl.tex_storage_2d(
                             glow::TEXTURE_2D,
                             num_levels as _,
@@ -1297,11 +1307,13 @@ impl d::Device<B> for Device {
                             h as _,
                         );
                     } else {
-                        gl.tex_parameter_i32(
-                            glow::TEXTURE_2D,
-                            glow::TEXTURE_MAX_LEVEL,
-                            (num_levels - 1) as _,
-                        );
+                        if self.share.info.version >= Version::new(3, 0, None, String::from("")) {
+                            gl.tex_parameter_i32(
+                                glow::TEXTURE_2D,
+                                glow::TEXTURE_MAX_LEVEL,
+                                (num_levels - 1) as _,
+                            );
+                        }
                         let mut w = w;
                         let mut h = h;
                         for i in 0 .. num_levels {
@@ -1377,7 +1389,7 @@ impl d::Device<B> for Device {
             match kind {
                 i::Kind::D2(w, h, 1, 1) => {
                     gl.bind_renderbuffer(glow::RENDERBUFFER, Some(name));
-                    gl.renderbuffer_storage(glow::RENDERBUFFER, int_format, w as _, h as _);
+                    gl.renderbuffer_storage(glow::RENDERBUFFER, /*int_format*/ glow::RGBA4, w as _, h as _);
                 }
                 _ => unimplemented!(),
             };
